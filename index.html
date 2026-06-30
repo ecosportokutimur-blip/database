@@ -99,9 +99,19 @@ input:focus,select:focus,textarea:focus{outline:none}
 .dark .nota-setting-group{background:rgba(79,70,229,0.06);border-color:rgba(129,140,248,0.1)}
 .db-pulse{animation:dbPulse 2s infinite}
 @keyframes dbPulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.db-sync-spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body class="light:bg-slate-50 dark:bg-slate-950 light:text-slate-800 dark:text-slate-200">
+
+<!-- LOADING SCREEN -->
+<div id="loadingScreen" class="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500">
+  <div class="w-16 h-16 rounded-2xl bg-white/20 backdrop-blur-sm flex items-center justify-center text-white text-2xl font-black mb-6">E</div>
+  <p class="text-white font-semibold text-lg mb-2">Eco Sport Jersey</p>
+  <p id="loadingText" class="text-white/70 text-sm">Menghubungkan ke database...</p>
+  <div class="mt-4 w-48 h-1 bg-white/20 rounded-full overflow-hidden"><div class="h-full bg-white rounded-full db-sync-spin" style="width:30%;margin-left:-30%"></div></div>
+</div>
 
 <!-- LOGIN SCREEN -->
 <div id="loginScreen" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 hidden">
@@ -168,7 +178,8 @@ input:focus,select:focus,textarea:focus{outline:none}
         <h2 id="pageTitle" class="text-lg font-bold light:text-slate-800 dark:text-slate-100">Dashboard</h2>
       </div>
       <div class="flex items-center gap-3">
-        <span id="dbStatusDot" class="w-2 h-2 rounded-full bg-emerald-400 db-pulse" title="Database aktif"></span>
+        <span id="dbStatusDot" class="w-2 h-2 rounded-full bg-emerald-400 db-pulse" title="Database terhubung"></span>
+        <span id="dbStatusText" class="text-xs light:text-slate-400 dark:text-slate-500 hidden sm:block">Online</span>
         <span class="text-xs light:text-slate-400 dark:text-slate-500 hidden sm:block" id="currentDate"></span>
         <div class="theme-toggle" onclick="toggleTheme()" title="Ganti Tema"><div class="knob"><i class="fas fa-sun" id="themeIcon"></i></div></div>
         <button onclick="resetData()" class="w-9 h-9 rounded-lg light:bg-red-50 dark:bg-red-950/30 light:text-red-400 dark:text-red-500/50 hover:opacity-70 flex items-center justify-center" title="Reset Data"><i class="fas fa-rotate-left text-sm"></i></button>
@@ -205,15 +216,22 @@ input:focus,select:focus,textarea:focus{outline:none}
 
 <script>
 /* ================================================================
-   DATABASE AWAL (db.json)
+   KONFIGURASI DATABASE GITHUB
+   Ganti nilai di bawah ini sesuai repository kamu.
    ================================================================ */
-var DEFAULT_DB = {
-  pelanggan: [], produk: [], pesanan: [], perekapan: [],
-  admins: [
-    { id:'sa_root', username:'superadmin', password:'super123', nama:'Super Admin', role:'superadmin', active:true, createdAt:'2025-01-01T00:00:00.000Z' },
-    { id:'sa_def',  username:'admin',      password:'admin123', nama:'Admin',       role:'admin',     active:true, createdAt:'2025-01-01T00:00:00.000Z' }
-  ]
+var DB_CONFIG = {
+  owner: 'USERNAME_GITHUB_KAMU',
+  repo: 'NAMA_REPOSITORY_KAMU',
+  branch: 'main',
+  file: 'db.json',
+  token: '' // Kosongkan jika hanya baca. Isi PAT jika ingin tulis.
 };
+/* ================================================================ */
+
+var DB_REMOTE_URL = 'https://raw.githubusercontent.com/' + DB_CONFIG.owner + '/' + DB_CONFIG.repo + '/' + DB_CONFIG.branch + '/' + DB_CONFIG.file;
+var DB_API_URL = 'https://api.github.com/repos/' + DB_CONFIG.owner + '/' + DB_CONFIG.repo + '/contents/' + DB_CONFIG.file;
+var DB_IS_ONLINE = false;
+var DB_SHA = null;
 
 /* ===== STATE ===== */
 var APP = { data:null, page:'dashboard', charts:{}, theme:'light', isLoggedIn:false, selectedNotaId:null, userRole:null, notaSettings:{ namaToko:'Eco Sport Jersey', alamatToko:'Jl. Olahraga No. 88, Bandung', telpToko:'0812-3456-7890', emailToko:'info@ecosportjersey.com', showStamp:true, showQR:true, notaType:'invoice' } };
@@ -226,16 +244,151 @@ function fToday(){ return new Date().toISOString().split('T')[0]; }
 
 /* ===== DATA ===== */
 function emptyData(){ return { pelanggan:[], produk:[], pesanan:[], perekapan:[] }; }
+
 function loadData(){
-  try{ var s=localStorage.getItem('ecoSportData'); if(s) return JSON.parse(s); }catch(e){}
-  var d={ pelanggan:DEFAULT_DB.pelanggan, produk:DEFAULT_DB.produk, pesanan:DEFAULT_DB.pesanan, perekapan:DEFAULT_DB.perekapan };
-  saveData(d); return d;
+  if(APP.data) return JSON.parse(JSON.stringify(APP.data));
+  var d=emptyData();
+  try{ var s=localStorage.getItem('ecoSportData'); if(s) d=JSON.parse(s); }catch(e){}
+  return d;
 }
-function saveData(d){ localStorage.setItem('ecoSportData',JSON.stringify(d)); }
+function saveData(d){
+  APP.data = JSON.parse(JSON.stringify(d));
+  localStorage.setItem('ecoSportData', JSON.stringify(d));
+  updateDbStatus(true);
+}
 function loadNotaSettings(){ try{ var s=localStorage.getItem('ecoNotaSettings'); if(s){ var p=JSON.parse(s); for(var k in p) APP.notaSettings[k]=p[k]; } }catch(e){} }
 function saveNotaSettings(){ localStorage.setItem('ecoNotaSettings',JSON.stringify(APP.notaSettings)); }
 
-/* ===== DATABASE EXPORT/IMPORT ===== */
+/* ===== DATABASE STATUS UI ===== */
+function updateDbStatus(saving){
+  var dot=document.getElementById('dbStatusDot');
+  var txt=document.getElementById('dbStatusText');
+  if(!dot||!txt) return;
+  if(saving){
+    dot.className='w-2 h-2 rounded-full bg-amber-400 db-sync-spin';
+    txt.textContent='Menyimpan...';
+  } else if(DB_IS_ONLINE){
+    dot.className='w-2 h-2 rounded-full bg-emerald-400 db-pulse';
+    txt.textContent='Online';
+  } else {
+    dot.className='w-2 h-2 rounded-full bg-amber-400';
+    txt.textContent='Lokal';
+  }
+}
+
+/* ===== GITHUB DB: FETCH ===== */
+function fetchRemoteDB(callback){
+  var lt=document.getElementById('loadingText');
+  if(lt) lt.textContent='Mengambil data dari GitHub...';
+
+  fetch(DB_REMOTE_URL + '?t=' + Date.now())
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(remoteData){
+      DB_IS_ONLINE = true;
+      var localData = null;
+      try{ var s=localStorage.getItem('ecoSportData'); if(s) localData=JSON.parse(s); }catch(e){}
+
+      var localTS = localData && localData._syncTS ? new Date(localData._syncTS).getTime() : 0;
+      var remoteTS = remoteData._meta && remoteData._meta.lastUpdated ? new Date(remoteData._meta.lastUpdated).getTime() : 0;
+
+      var finalData;
+      if(remoteTS >= localTS){
+        finalData = remoteData;
+        if(lt) lt.textContent='Data online dimuat (' + fDt(remoteData._meta.lastUpdated) + ')';
+      } else {
+        finalData = localData;
+        if(lt) lt.textContent='Data lokal lebih baru, menggunakan data lokal';
+      }
+
+      APP.data = {
+        pelanggan: finalData.pelanggan || [],
+        produk: finalData.produk || [],
+        pesanan: finalData.pesanan || [],
+        perekapan: finalData.perekapan || []
+      };
+      saveData(APP.data);
+
+      if(finalData.admins){
+        localStorage.setItem('ecoAdminUsers', JSON.stringify(finalData.admins));
+      }
+
+      callback(null);
+    })
+    .catch(function(err){
+      console.warn('GitHub fetch gagal, menggunakan data lokal:', err.message);
+      DB_IS_ONLINE = false;
+      APP.data = loadData();
+      if(lt) lt.textContent='Offline — menggunakan data lokal';
+      callback(null);
+    });
+}
+
+/* ===== GITHUB DB: PUSH (Opsional, butuh token) ===== */
+function pushToGitHub(callback){
+  if(!DB_CONFIG.token){
+    return callback ? callback(new Error('Token tidak dikonfigurasi')) : null;
+  }
+  if(!DB_IS_ONLINE){
+    return callback ? callback(new Error('Tidak online')) : null;
+  }
+
+  var pushData = {
+    _meta: { appName:'Eco Sport Jersey', version:'1.0', lastUpdated: new Date().toISOString() },
+    admins: loadAdmins(),
+    pelanggan: APP.data.pelanggan,
+    produk: APP.data.produk,
+    pesanan: APP.data.pesanan,
+    perekapan: APP.data.perekapan
+  };
+
+  var content = btoa(unescape(encodeURIComponent(JSON.stringify(pushData, null, 2))));
+  var body = { message: 'Update db.json [' + new Date().toLocaleString('id-ID') + ']', content: content };
+
+  if(DB_SHA) body.sha = DB_SHA;
+
+  fetch(DB_API_URL, {
+    method: 'PUT',
+    headers: {
+      'Authorization': 'Bearer ' + DB_CONFIG.token,
+      'Accept': 'application/vnd.github.v3+json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  })
+  .then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(function(res){
+    DB_SHA = res.content.sha;
+    pushData._syncTS = new Date().toISOString();
+    APP.data._syncTS = pushData._syncTS;
+    localStorage.setItem('ecoSportData', JSON.stringify(APP.data));
+    updateDbStatus(false);
+    if(callback) callback(null);
+  })
+  .catch(function(err){
+    console.error('Push gagal:', err.message);
+    updateDbStatus(false);
+    if(callback) callback(err);
+  });
+}
+
+var _saveTimeout = null;
+function saveDataWithSync(d){
+  saveData(d);
+  clearTimeout(_saveTimeout);
+  _saveTimeout = setTimeout(function(){
+    pushToGitHub(function(err){
+      if(!err) toast('Database disinkronkan ke GitHub','success');
+    });
+  }, 3000);
+}
+
+/* ===== DB EXPORT/IMPORT ===== */
 function dbExport(){
   var exportObj = { _meta:{appName:'Eco Sport Jersey',exportedAt:new Date().toISOString(),version:'1.0'}, pelanggan:APP.data.pelanggan, produk:APP.data.produk, pesanan:APP.data.pesanan, perekapan:APP.data.perekapan, admins:loadAdmins() };
   var blob = new Blob([JSON.stringify(exportObj,null,2)], {type:'application/json'});
@@ -253,7 +406,7 @@ function dbImportFile(e){
       if(!obj.pelanggan||!obj.produk||!obj.pesanan) throw new Error('Format tidak valid');
       showConfirm('Import database akan menimpa semua data saat ini. Lanjutkan?',function(){
         APP.data.pelanggan=obj.pelanggan||[]; APP.data.produk=obj.produk||[]; APP.data.pesanan=obj.pesanan||[]; APP.data.perekapan=obj.perekapan||[];
-        saveData(APP.data);
+        saveDataWithSync(APP.data);
         if(obj.admins) localStorage.setItem('ecoAdminUsers',JSON.stringify(obj.admins));
         go(APP.page); toast('Database berhasil di-import','success');
       });
@@ -266,8 +419,8 @@ function dbTriggerImport(){ document.getElementById('dbImportInput').click(); }
 /* ===== ADMIN DATA ===== */
 function loadAdmins(){
   try{ var s=localStorage.getItem('ecoAdminUsers'); if(s) return JSON.parse(s); }catch(e){}
-  localStorage.setItem('ecoAdminUsers',JSON.stringify(DEFAULT_DB.admins));
-  return DEFAULT_DB.admins;
+  var def=[{id:'sa_root',username:'superadmin',password:'super123',nama:'Super Admin',role:'superadmin',active:true,createdAt:'2025-01-01T00:00:00.000Z'},{id:'sa_def',username:'admin',password:'admin123',nama:'Admin',role:'admin',active:true,createdAt:'2025-01-01T00:00:00.000Z'}];
+  localStorage.setItem('ecoAdminUsers',JSON.stringify(def)); return def;
 }
 function saveAdmins(l){ localStorage.setItem('ecoAdminUsers',JSON.stringify(l)); }
 
@@ -403,7 +556,7 @@ document.getElementById('confirmBtn').addEventListener('click',function(){ var c
 
 function resetData(){
   if(APP.userRole!=='superadmin') return toast('Hanya Super Admin yang bisa reset data','error');
-  showConfirm('Yakin ingin mereset semua data?',function(){ APP.data=emptyData(); saveData(APP.data); go(APP.page); toast('Data berhasil direset'); });
+  showConfirm('Yakin ingin mereset semua data?',function(){ APP.data=emptyData(); saveDataWithSync(APP.data); go(APP.page); toast('Data berhasil direset'); });
 }
 
 /* ===== RENDER ===== */
@@ -507,9 +660,9 @@ function simpanPesanan(id){
   if(!f.pelangganId||!f.produkId||f.jumlah<=0) return toast('Lengkapi semua field wajib','error');
   if(id){ for(var i=0;i<APP.data.pesanan.length;i++){ if(APP.data.pesanan[i].id===id){ for(var k in f) APP.data.pesanan[i][k]=f[k]; break; } } toast('Pesanan diperbarui'); }
   else { f.id=gid(); APP.data.pesanan.push(f); toast('Pesanan baru ditambahkan'); }
-  saveData(APP.data); closeModal(); go('pesanan');
+  saveDataWithSync(APP.data); closeModal(); go('pesanan');
 }
-function hapusPesanan(id){ showConfirm('Yakin ingin menghapus pesanan ini?',function(){ APP.data.pesanan=APP.data.pesanan.filter(function(o){return o.id!==id;}); saveData(APP.data); go('pesanan'); toast('Pesanan dihapus'); }); }
+function hapusPesanan(id){ showConfirm('Yakin ingin menghapus pesanan ini?',function(){ APP.data.pesanan=APP.data.pesanan.filter(function(o){return o.id!==id;}); saveDataWithSync(APP.data); go('pesanan'); toast('Pesanan dihapus'); }); }
 function detailPesanan(id){
   var o=APP.data.pesanan.find(function(x){return x.id===id;}); if(!o) return;
   var pl=APP.data.pelanggan.find(function(p){return p.id===o.pelangganId;}); var pr=APP.data.produk.find(function(p){return p.id===o.produkId;});
@@ -556,9 +709,9 @@ function simpanPelanggan(id){
   if(!f.nama) return toast('Nama wajib diisi','error');
   if(id){ for(var i=0;i<APP.data.pelanggan.length;i++){ if(APP.data.pelanggan[i].id===id){ for(var k in f) APP.data.pelanggan[i][k]=f[k]; break; } } toast('Pelanggan diperbarui'); }
   else { f.id=gid(); APP.data.pelanggan.push(f); toast('Pelanggan ditambahkan'); }
-  saveData(APP.data); closeModal(); go('pelanggan');
+  saveDataWithSync(APP.data); closeModal(); go('pelanggan');
 }
-function hapusPelanggan(id){ showConfirm('Yakin ingin menghapus pelanggan ini?',function(){ APP.data.pelanggan=APP.data.pelanggan.filter(function(p){return p.id!==id;}); saveData(APP.data); go('pelanggan'); toast('Pelanggan dihapus'); }); }
+function hapusPelanggan(id){ showConfirm('Yakin ingin menghapus pelanggan ini?',function(){ APP.data.pelanggan=APP.data.pelanggan.filter(function(p){return p.id!==id;}); saveDataWithSync(APP.data); go('pelanggan'); toast('Pelanggan dihapus'); }); }
 
 /* ----- PRODUK ----- */
 function rProduk(){
@@ -591,9 +744,9 @@ function simpanProduk(id){
   if(!f.nama) return toast('Nama produk wajib diisi','error');
   if(id){ for(var i=0;i<APP.data.produk.length;i++){ if(APP.data.produk[i].id===id){ for(var k in f) APP.data.produk[i][k]=f[k]; break; } } toast('Produk diperbarui'); }
   else { f.id=gid(); APP.data.produk.push(f); toast('Produk ditambahkan'); }
-  saveData(APP.data); closeModal(); go('produk');
+  saveDataWithSync(APP.data); closeModal(); go('produk');
 }
-function hapusProduk(id){ showConfirm('Yakin ingin menghapus produk ini?',function(){ APP.data.produk=APP.data.produk.filter(function(p){return p.id!==id;}); saveData(APP.data); go('produk'); toast('Produk dihapus'); }); }
+function hapusProduk(id){ showConfirm('Yakin ingin menghapus produk ini?',function(){ APP.data.produk=APP.data.produk.filter(function(p){return p.id!==id;}); saveDataWithSync(APP.data); go('produk'); toast('Produk dihapus'); }); }
 
 /* ----- PEREKAPAN ----- */
 function rRekap(){
@@ -628,9 +781,9 @@ function simpanRekap(id){
   if(f.jumlah<=0) return toast('Jumlah harus lebih dari 0','error');
   if(id){ for(var i=0;i<APP.data.perekapan.length;i++){ if(APP.data.perekapan[i].id===id){ for(var k in f) APP.data.perekapan[i][k]=f[k]; break; } } toast('Transaksi diperbarui'); }
   else { f.id=gid(); APP.data.perekapan.push(f); toast('Transaksi ditambahkan'); }
-  saveData(APP.data); closeModal(); go('perekapan');
+  saveDataWithSync(APP.data); closeModal(); go('perekapan');
 }
-function hapusRekap(id){ showConfirm('Yakin ingin menghapus transaksi ini?',function(){ APP.data.perekapan=APP.data.perekapan.filter(function(r){return r.id!==id;}); saveData(APP.data); go('perekapan'); toast('Transaksi dihapus'); }); }
+function hapusRekap(id){ showConfirm('Yakin ingin menghapus transaksi ini?',function(){ APP.data.perekapan=APP.data.perekapan.filter(function(r){return r.id!==id;}); saveDataWithSync(APP.data); go('perekapan'); toast('Transaksi dihapus'); }); }
 
 /* ----- NOTA ----- */
 function rNota(){
@@ -713,11 +866,13 @@ function rKelolaAdmin(){
   return '<div class="fade-in space-y-5"><div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"><div><h3 class="font-bold '+TCLR2+' text-base">Daftar Pengguna</h3><p class="text-sm '+SCLR+' mt-0.5">Kelola akun yang dapat mengakses panel ini.</p></div><button onclick="saFormAdmin()" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2"><i class="fas fa-user-plus"></i> Tambah Admin</button></div>'+
     '<div class="'+CBG+' rounded-2xl border shadow-sm p-5"><h4 class="font-bold '+TCLR2+' text-sm mb-3"><i class="fas fa-shield-halved '+ICLR+' mr-2"></i>Ringkasan Akses per Role</h4>'+permInfo+'</div>'+
     '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" id="saAdminGrid">'+(cards||C('users','Tidak Ada Data','Belum ada akun admin terdaftar'))+'</div>'+
-    '<div class="'+CBG+' rounded-2xl border shadow-sm p-5"><h4 class="font-bold '+TCLR2+' text-sm mb-3"><i class="fas fa-database '+ICLR+' mr-2"></i>Manajemen Database</h4><p class="text-sm '+SCLR+' mb-4">Export database sebagai file JSON untuk backup, atau import untuk memulihkan data.</p><div class="flex flex-wrap gap-3">'+
+    '<div class="'+CBG+' rounded-2xl border shadow-sm p-5"><h4 class="font-bold '+TCLR2+' text-sm mb-3"><i class="fas fa-database '+ICLR+' mr-2"></i>Manajemen Database</h4>'+
+    '<div class="flex flex-wrap gap-2 mb-4 p-3 rounded-xl text-sm '+(DB_IS_ONLINE?'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400':'bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400')+'"><i class="fas fa-'+(DB_IS_ONLINE?'wifi':'wifi-slash')+'"></i> Status: '+(DB_IS_ONLINE?'Terhubung ke GitHub ('+DB_CONFIG.owner+'/'++DB_CONFIG.repo+')':'Tidak terhubung — data hanya tersimpan lokal di browser ini')+'</div>'+
+    '<div class="flex flex-wrap gap-3">'+
     '<button onclick="dbExport()" class="btn-export flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold border light:border-slate-200 dark:border-slate-700 '+(APP.theme==='dark'?'bg-slate-800 text-slate-300':'bg-white text-slate-600')+'"><i class="fas fa-download"></i> Export JSON</button>'+
     '<button onclick="dbTriggerImport()" class="btn-export flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold border light:border-slate-200 dark:border-slate-700 '+(APP.theme==='dark'?'bg-slate-800 text-slate-300':'bg-white text-slate-600')+'"><i class="fas fa-upload"></i> Import JSON</button>'+
     '<button onclick="saResetDB()" class="btn-export flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold border border-red-200 dark:border-red-900/50 text-red-500 hover:!bg-red-50 dark:hover:!bg-red-950/30"><i class="fas fa-trash-can"></i> Hapus Semua Data</button></div>'+
-    '<div class="mt-4 p-3 rounded-xl text-xs '+SCLR+' '+(APP.theme==='dark'?'bg-slate-800/50':'bg-slate-50')+'"><i class="fas fa-circle-info mr-1 '+ICLR+'"></i> File JSON berisi seluruh data pesanan, pelanggan, produk, perekapan, dan akun admin. Simpan file ini di tempat yang aman sebagai backup.</div></div></div>';
+    '<div class="mt-4 p-3 rounded-xl text-xs '+SCLR+' '+(APP.theme==='dark'?'bg-slate-800/50':'bg-slate-50')+'"><i class="fas fa-circle-info mr-1 '+ICLR+'"></i> Mode <b>baca</b>: Data diambil dari db.json di GitHub saat loading. Mode <b>tulis</b>: Butuh Personal Access Token (PAT) di konfigurasi DB_CONFIG.token untuk menyimpan perubahan kembali ke GitHub.</div></div></div>';
 }
 function buildPermSummary(){
   var roles=['superadmin','admin'],labels={superadmin:'Super Admin',admin:'Admin'},colors={superadmin:'#f59e0b',admin:'#6366f1'};
@@ -758,22 +913,27 @@ function saSimpanAdmin(id){
 }
 function saHapusAdmin(id){ showConfirm('Yakin ingin menghapus akun admin ini?',function(){ saveAdmins(loadAdmins().filter(function(a){return a.id!==id;})); go('kelolaAdmin'); toast('Akun admin dihapus'); }); }
 function saToggleAdmin(id){ var admins=loadAdmins(); for(var i=0;i<admins.length;i++){ if(admins[i].id===id){ admins[i].active=!admins[i].active; toast('Akun '+(admins[i].active?'diaktifkan':'dinonaktifkan'),admins[i].active?'success':'warning'); break; } } saveAdmins(admins); go('kelolaAdmin'); }
-function saResetDB(){ showConfirm('PERINGATAN: Semua data pesanan, pelanggan, produk, dan perekapan akan dihapus permanen. Lanjutkan?',function(){ APP.data=emptyData(); saveData(APP.data); go('kelolaAdmin'); toast('Semua data telah dihapus','success'); }); }
+function saResetDB(){ showConfirm('PERINGATAN: Semua data akan dihapus permanen. Lanjutkan?',function(){ APP.data=emptyData(); saveDataWithSync(APP.data); go('kelolaAdmin'); toast('Semua data telah dihapus','success'); }); }
 
-/* ===== INIT ===== */
+/* ===== INIT: FETCH DARI GITHUB DULU ===== */
 (function(){
-  APP.data=loadData(); loadNotaSettings(); loadTheme(); loadAdmins();
+  loadTheme(); loadNotaSettings(); loadAdmins();
   document.getElementById('currentDate').textContent=fDtFull(new Date());
-  if(localStorage.getItem('ecoSportLogin')){
-    APP.userRole=localStorage.getItem('ecoUserRole')||'admin';
-    APP.isLoggedIn=true;
-    document.getElementById('loginScreen').classList.add('hidden');
-    document.getElementById('appContainer').classList.remove('hidden');
-    if(!canAccess(APP.page)) APP.page=firstAllowed();
-    applyRoleUI(); go(APP.page);
-  } else {
-    document.getElementById('loginScreen').classList.remove('hidden');
-  }
+
+  fetchRemoteDB(function(err){
+    setTimeout(function(){
+      document.getElementById('loadingScreen').style.display='none';
+      if(localStorage.getItem('ecoSportLogin')){
+        APP.userRole=localStorage.getItem('ecoUserRole')||'admin';
+        APP.isLoggedIn=true;
+        document.getElementById('appContainer').classList.remove('hidden');
+        if(!canAccess(APP.page)) APP.page=firstAllowed();
+        applyRoleUI(); go(APP.page);
+      } else {
+        document.getElementById('loginScreen').classList.remove('hidden');
+      }
+    }, 800);
+  });
 })();
 </script>
 </body>
